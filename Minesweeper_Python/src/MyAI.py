@@ -38,6 +38,9 @@ class MyAI(AI):
         # Tiles we have already proven safe but haven't uncovered yet.
         self.safe_queue = deque()
 
+        # Tiles provably mines:
+        self.mines = set()
+
         # Tiles that we have seen (or are already queued to be seen)
         self.queued = set()
 
@@ -61,8 +64,8 @@ class MyAI(AI):
     #
 
     def getAction(self, number: int) -> Action:
-        # After FLAG/UNFLAG the world sends -1; do not overwrite the board.
         if number == -1:
+            # If the last action was a flag/unflag, add/remove the tile to the flagged set
             if self._last_action == AI.Action.FLAG:
                 self.flagged.add((self.last_x, self.last_y))
             elif self._last_action == AI.Action.UNFLAG:
@@ -83,7 +86,7 @@ class MyAI(AI):
                         self.safe_queue.append((nx, ny))
                         self.queued.add((nx, ny))
             else:
-                # tile is a frontier tile (we are unsure right now)
+                # tile is a non-zero frontier tile (we are unsure right now)
                 self.frontier.add((self.last_x, self.last_y))
 
         # Clear all guaranteed safe tiles (to get to the full frontier)
@@ -96,16 +99,27 @@ class MyAI(AI):
                 continue
             return res
 
-        # continue code for locality semantics
-        for fx, fy in self.frontier:
+        # flag all provably mines
+        if self.mines:
+            x, y = self.mines.pop()
+            self.store_action(x, y, AI.Action.FLAG)
+            return Action(AI.Action.FLAG, x, y)
+
+        # continue code for locality semantics (iterate a copy: loop may discard from frontier)
+        for fx, fy in list(self.frontier):
             res, flags = self.check_position(fx, fy)
 
             # if all empty spots are mines...
             num_empty = len(res)
             mine_total = self.board[fx][fy]
 
-            # all free positions are guaranteed to be free
-            if flags == mine_total:
+            # if there are no empty spots, remove from frontier (since we can't do anything with it)
+            if num_empty == 0:
+                self.frontier.discard((fx, fy))
+
+            mines_among_unknown = mine_total - flags
+            # all free positions are guaranteed to be free (mines among unknowns = 0)
+            if res and mines_among_unknown == 0:
                 for pos_tup in res:
                     self.safe_queue.append(pos_tup)
 
@@ -114,21 +128,29 @@ class MyAI(AI):
                 return self.uncover_tile(x, y)
 
             # all unknown positions are mines
-            if num_empty == mine_total:
-                # NOTE: a single mine assignment statement here is fine for now -> Need to fix this in non minimal AI.
-                mine_x, mine_y = res[0]
+            if res and num_empty == mines_among_unknown:
+                for pos_tup in res:
+                    self.mines.add(pos_tup)
 
-                # NOTE: This is NOT optimal, and is overfit to work for this minimal AI example.
-                for dx, dy in POSITIONS:
-                    t_x = mine_x + dx
-                    t_y = mine_y + dy
-                    if 0 <= t_x < self.colDimension and 0 <= t_y < self.rowDimension:
-                        self.safe_queue.append((t_x, t_y))
-                    self.frontier.discard((t_x, t_y))
+                # technically could be unsafe..?
+                x, y = res[0]
+                self.mines.discard((x, y))
+                self.store_action(x, y, AI.Action.FLAG)
+                return Action(AI.Action.FLAG, x, y)
 
-                return Action(AI.Action.FLAG, mine_x, mine_y)
+        # If we have flagged all mines, all remaining tiles can be assumed to be safe
+        if len(self.flagged) == self.totalMines:
+            for x in range(self.colDimension):
+                for y in range(self.rowDimension):
+                    if self.board[x][y] == -1 and (x, y) not in self.flagged:
+                        self.safe_queue.append((x, y))
 
         return Action(AI.Action.LEAVE)
+
+    def store_action(self, x, y, action):
+        self.last_x = x
+        self.last_y = y
+        self._last_action = action
 
     def check_position(self, x, y) -> list[list[tuple[int, int]], int]:
         # single check function:
@@ -142,7 +164,7 @@ class MyAI(AI):
             if (t_x, t_y) in self.flagged:
                 flags += 1
 
-            if (
+            elif (
                 0 <= t_x < self.colDimension
                 and 0 <= t_y < self.rowDimension
                 and self.board[t_x][t_y] == -1
@@ -154,9 +176,7 @@ class MyAI(AI):
     def uncover_tile(self, x, y) -> Action | None:
         if self.board[x][y] != -1:
             return None
-        self.last_x = x
-        self.last_y = y
-        self._last_action = AI.Action.UNCOVER
+        self.store_action(x, y, AI.Action.UNCOVER)
         return Action(AI.Action.UNCOVER, x, y)
 
     ########################################################################
