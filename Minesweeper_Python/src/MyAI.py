@@ -17,9 +17,8 @@
 from AI import AI
 from Action import Action
 from collections import deque
-import math
 
-# offsets for
+# offsets for checking neighbors
 POSITIONS = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
 
 
@@ -58,11 +57,6 @@ class MyAI(AI):
     ########################################################################
     # YOUR CODE ENDS						   #
     ########################################################################
-
-    #
-    # Helpers added for full-frontier CSP and globally weighted guessing
-    #
-
     def getAction(self, number: int) -> Action:
         if number == -1:
             # If the last action was a flag/unflag, add/remove the tile to the flagged set
@@ -105,7 +99,7 @@ class MyAI(AI):
             self.store_action(x, y, AI.Action.FLAG)
             return Action(AI.Action.FLAG, x, y)
 
-        # continue code for locality semantics (iterate a copy: loop may discard from frontier)
+        # continue code for frontier
         for fx, fy in list(self.frontier):
             res, flags = self.check_position(fx, fy)
 
@@ -123,7 +117,7 @@ class MyAI(AI):
                 for pos_tup in res:
                     self.safe_queue.append(pos_tup)
 
-                # technically could be unsafe..?
+                # technically could be unsafe out if x,y is out of bounds..?
                 x, y = self.safe_queue.popleft()
                 return self.uncover_tile(x, y)
 
@@ -132,7 +126,7 @@ class MyAI(AI):
                 for pos_tup in res:
                     self.mines.add(pos_tup)
 
-                # technically could be unsafe..?
+                # technically could be unsafe out of bounds in case res is empty..?
                 x, y = res[0]
                 self.mines.discard((x, y))
                 self.store_action(x, y, AI.Action.FLAG)
