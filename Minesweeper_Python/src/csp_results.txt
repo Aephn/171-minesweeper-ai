@@ -1,0 +1,4 @@
+easy: 85
+medium: 44
+expert: 5
+score: 188

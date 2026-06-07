@@ -1,0 +1,4 @@
+easy: 5
+medium: 5
+expert: 2
+score: 21
