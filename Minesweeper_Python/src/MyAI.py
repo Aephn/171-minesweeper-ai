@@ -21,6 +21,8 @@ from collections import deque
 # offsets for checking neighbors
 POSITIONS = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
 
+MAX_CSP_COMPONENT_SIZE = 20
+
 
 class MyAI(AI):
     def __init__(self, rowDimension, colDimension, totalMines, startX, startY):
@@ -58,13 +60,17 @@ class MyAI(AI):
     ########################################################################
     # YOUR CODE ENDS						   #
     ########################################################################
-    
+
     def getAction(self, number: int) -> Action:
         self.update_after_uncover(number)
 
-        self.apply_basic_rules()
+        while True:
+            changed = self.apply_basic_rules()
+            changed |= self.apply_csp_rules()
+            if not changed:
+                break
         self.apply_global_rules()
-        
+
         action = self.pop_safe_action()
         if action is not None:
             return action
@@ -80,11 +86,10 @@ class MyAI(AI):
 
         return Action(AI.Action.LEAVE)
 
-        
     def update_after_uncover(self, number):
         if number == -1:
             return
-        
+
         if self.board[self.last_x][self.last_y] == -1:
             self.board[self.last_x][self.last_y] = number
             self.uncovered_count += 1
@@ -96,6 +101,7 @@ class MyAI(AI):
             self.frontier.add((self.last_x, self.last_y))
 
     def apply_basic_rules(self):
+        any_changed = False
         changed = True
 
         while changed:
@@ -124,9 +130,10 @@ class MyAI(AI):
 
                 # If all mines are found, rest are safe
                 if remaining_mines <= 0:
-                    for x, y in unknowns:
-                        if self.add_safe(x, y):
+                    for ux, uy in unknowns:
+                        if self.add_safe(ux, uy):
                             changed = True
+                            any_changed = True
 
                 # If all unknowns must be mines, mark them
                 elif remaining_mines == len(unknowns):
@@ -135,7 +142,177 @@ class MyAI(AI):
                             self.known_mines.add(tile)
                             self.safe_set.discard(tile)
                             changed = True
+                            any_changed = True
 
+        return any_changed
+
+    def build_constraints(self):
+        constraints = set()
+
+        for x, y in self.frontier:
+            clue = self.board[x][y]
+            if clue <= 0:
+                continue
+
+            unknowns = []
+            known_mine_count = 0
+
+            for nx, ny in self.neighbors(x, y):
+                if (nx, ny) in self.known_mines:
+                    known_mine_count += 1
+                elif self.board[nx][ny] == -1:
+                    unknowns.append((nx, ny))
+
+            remaining = clue - known_mine_count
+            if unknowns and 0 < remaining < len(unknowns):
+                constraints.add((frozenset(unknowns), remaining))
+
+        return list(constraints)
+
+    def apply_diff(self, diff_cells, diff_mines):
+        changed = False
+
+        if diff_mines == 0:
+            for tile in diff_cells:
+                if self.add_safe(tile[0], tile[1]):
+                    changed = True
+        elif diff_mines == len(diff_cells):
+            for tile in diff_cells:
+                if tile not in self.known_mines:
+                    self.known_mines.add(tile)
+                    self.safe_set.discard(tile)
+                    changed = True
+
+        return changed
+
+    def apply_subset_rules(self, constraints):
+        changed = False
+
+        for i, (cells_a, count_a) in enumerate(constraints):
+            for cells_b, count_b in constraints[i + 1 :]:
+                if cells_a <= cells_b:
+                    if self.apply_diff(cells_b - cells_a, count_b - count_a):
+                        changed = True
+                elif cells_b <= cells_a:
+                    if self.apply_diff(cells_a - cells_b, count_a - count_b):
+                        changed = True
+
+        return changed
+
+    def split_components(self, constraints):
+        parent = {}
+
+        def find(tile):
+            if tile not in parent:
+                parent[tile] = tile
+            if parent[tile] != tile:
+                parent[tile] = find(parent[tile])
+            return parent[tile]
+
+        def union(a, b):
+            root_a = find(a)
+            root_b = find(b)
+            if root_a != root_b:
+                parent[root_b] = root_a
+
+        for cells, _ in constraints:
+            cell_list = list(cells)
+            for i in range(1, len(cell_list)):
+                union(cell_list[0], cell_list[i])
+
+        comp_vars = {}
+        for cells, _ in constraints:
+            for tile in cells:
+                root = find(tile)
+                comp_vars.setdefault(root, set()).add(tile)
+
+        result = []
+        for var_set in comp_vars.values():
+            var_list = list(var_set)
+            comp_constraints = []
+            seen = set()
+
+            for cells, count in constraints:
+                if cells <= var_set:
+                    key = (cells, count)
+                    if key not in seen:
+                        seen.add(key)
+                        comp_constraints.append((cells, count))
+
+            result.append((var_list, comp_constraints))
+
+        return result
+
+    def satisfies_constraints(self, constraints, assignment):
+        for cells, count in constraints:
+            if sum(assignment[tile] for tile in cells) != count:
+                return False
+        return True
+
+    def enumerate_component(self, vars_list, constraints):
+        n = len(vars_list)
+        if n > MAX_CSP_COMPONENT_SIZE or not constraints:
+            return False
+
+        valid_assignments = []
+
+        for mask in range(1 << n):
+            assignment = {vars_list[i]: (mask >> i) & 1 for i in range(n)}
+            if self.satisfies_constraints(constraints, assignment):
+                valid_assignments.append(assignment)
+
+        if not valid_assignments:
+            return False
+
+        changed = False
+        for tile in vars_list:
+            if all(a[tile] == 1 for a in valid_assignments):
+                if tile not in self.known_mines:
+                    self.known_mines.add(tile)
+                    self.safe_set.discard(tile)
+                    changed = True
+            elif all(a[tile] == 0 for a in valid_assignments):
+                if self.add_safe(tile[0], tile[1]):
+                    changed = True
+
+        return changed
+
+    def apply_csp_rules(self):
+        constraints = self.build_constraints()
+        changed = self.apply_subset_rules(constraints)
+
+        for vars_list, component_constraints in self.split_components(constraints):
+            if self.enumerate_component(vars_list, component_constraints):
+                changed = True
+
+        return changed
+
+    def compute_csp_probabilities(self):
+        constraints = self.build_constraints()
+        probabilities = {}
+
+        for vars_list, component_constraints in self.split_components(constraints):
+            n = len(vars_list)
+            if n > MAX_CSP_COMPONENT_SIZE or not component_constraints:
+                continue
+
+            mine_counts = {tile: 0 for tile in vars_list}
+            valid_count = 0
+
+            for mask in range(1 << n):
+                assignment = {vars_list[i]: (mask >> i) & 1 for i in range(n)}
+                if self.satisfies_constraints(component_constraints, assignment):
+                    valid_count += 1
+                    for tile in vars_list:
+                        mine_counts[tile] += assignment[tile]
+
+            if valid_count == 0:
+                continue
+
+            for tile in vars_list:
+                probabilities[tile] = float(mine_counts[tile]) / float(valid_count)
+
+        return probabilities
 
     def apply_global_rules(self):
         unknowns = self.all_unknown_tiles()
@@ -152,13 +329,13 @@ class MyAI(AI):
                 self.known_mines.add(tile)
                 self.safe_set.discard(tile)
 
-
     def guess_tile(self):
         unknowns = self.all_unknown_tiles()
 
         if not unknowns:
             return None
 
+        csp_probs = self.compute_csp_probabilities()
         remaining_mines = max(0, self.totalMines - len(self.known_mines))
         global_risk = float(remaining_mines) / float(len(unknowns))
 
@@ -166,30 +343,7 @@ class MyAI(AI):
         best_risk = 2.0
 
         for x, y in unknowns:
-            risks = [global_risk]
-
-            # Check nearby clues to estimate risk
-            for nx, ny in self.neighbors(x, y):
-                clue = self.board[nx][ny]
-
-                if clue <= 0:
-                    continue
-
-                unknown_neighbors = []
-                known_mine_count = 0
-
-                for ax, ay in self.neighbors(nx, ny):
-                    if (ax, ay) in self.known_mines:
-                        known_mine_count += 1
-                    elif self.board[ax][ay] == -1:
-                        unknown_neighbors.append((ax, ay))
-
-                remaining = clue - known_mine_count
-
-                if unknown_neighbors and remaining >= 0:
-                    risks.append(float(remaining) / float(len(unknown_neighbors)))
-
-            risk = max(risks)
+            risk = csp_probs.get((x, y), global_risk)
 
             # Small preference for edges/corners
             if x == 0 or x == self.colDimension - 1:
@@ -207,7 +361,6 @@ class MyAI(AI):
 
         return self.uncover_tile(best_tile[0], best_tile[1])
 
-
     def pop_safe_action(self):
         while self.safe_queue:
             x, y = self.safe_queue.popleft()
@@ -217,7 +370,6 @@ class MyAI(AI):
                 return self.uncover_tile(x, y)
 
         return None
-
 
     def add_safe(self, x, y):
         if not self.in_bounds(x, y):
@@ -239,7 +391,6 @@ class MyAI(AI):
 
         return True
 
-
     def all_unknown_tiles(self):
         result = []
 
@@ -249,7 +400,6 @@ class MyAI(AI):
                     result.append((x, y))
 
         return result
-
 
     def neighbors(self, x, y):
         result = []
@@ -263,16 +413,13 @@ class MyAI(AI):
 
         return result
 
-
     def in_bounds(self, x, y):
         return 0 <= x < self.colDimension and 0 <= y < self.rowDimension
-
 
     def store_action(self, x, y, action):
         self.last_x = x
         self.last_y = y
         self.last_action = action
-
 
     def uncover_tile(self, x, y):
         if not self.in_bounds(x, y):
